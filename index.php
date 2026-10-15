@@ -28,9 +28,8 @@ try {
 $scan_result = null;
 $error_message = null;
 
-// تحليل محلي ذكي يعتمد على خصائص الصورة الحقيقية (GD Library)
 function analyzeLocallyWithoutApi($filePath) {
-    $score = 20; // نقطة بداية منخفضة لصالح الصور الحقيقية
+    $score = 20; 
     $notes = [];
 
     $imageInfo = @getimagesize($filePath);
@@ -42,7 +41,6 @@ function analyzeLocallyWithoutApi($filePath) {
     $height = $imageInfo[1];
     $fileSize = filesize($filePath);
 
-    // 1. فحص الأبعاد القياسية لأدوات التوليد (مثل Midjourney و DALL-E)
     $standardAiSizes = ['1024x1024', '512x512', '768x768', '1536x1024', '1024x1536'];
     $currentDim = "{$width}x{$height}";
     if (in_array($currentDim, $standardAiSizes)) {
@@ -53,11 +51,10 @@ function analyzeLocallyWithoutApi($filePath) {
         $notes[] = "أبعاد الصورة طبيعية غير قياسية";
     }
 
-    // 2. تحليل نسبة الحجم إلى الأبعاد (حجم الملف الصغير مع أبعاد كبيرة جداً غالباً يدل على توليد AI أو ضغط اصطناعي)
     $pixelCount = $width * $height;
     $bytesPerPixel = $fileSize / $pixelCount;
     
-    if ($bytesPerPixel < 0.15) { // ضغط ععالي وملمس ناعم جداً
+    if ($bytesPerPixel < 0.15) { 
         $score += 30;
         $notes[] = "معدل تفاصيل البايتات يشير إلى نعومة اصطناعية";
     } else {
@@ -65,17 +62,15 @@ function analyzeLocallyWithoutApi($filePath) {
         $notes[] = "تشبع البايتات والضوضاء طبيعي (صورة حقيقية)";
     }
 
-    // 3. فحص بيانات EXIF الكاميرا
     $exif = @exif_read_data($filePath);
     if ($exif && (isset($exif['Make']) || isset($exif['Model']))) {
-        $score -= 30; // وجود كاميرا حقيقية يخفض نسبة الـ AI بشكل كبير
+        $score -= 30; 
         $notes[] = "تم رصد بصمة كاميرا رقمية أصلية";
     } else {
         $score += 15;
         $notes[] = "لا توجد بصمة كاميرا (مأخوذة من إنترنت أو منشأة)";
     }
 
-    // ضبط الحدود لمنع التطرف في النتائج
     if ($score < 10) $score = rand(8, 18);
     if ($score > 90) $score = rand(85, 94);
 
@@ -213,7 +208,7 @@ $history = $db->query("SELECT * FROM local_scans ORDER BY id DESC LIMIT 20")->fe
         
         <div class="panel">
             <h1>Local AI Forensic Terminal <span class="badge">LOCAL v5.0</span></h1>
-            <p class="subtitle">نظام تحليل محلي متطور يفحص بصمات الكاميرا، أبعاد الصور، وكثافة البيانات داخل PHP دون الحاجة لأي مفاتيح خارجية.</p>
+            <p class="subtitle">نظام تحليل محلي متطور يفحص بصمات الكاميرا، أبعاد الصور، وكثافة البيانات داخل PHP.</p>
             
             <?php if ($error_message): ?>
                 <div class="error-box"><?php echo htmlspecialchars($error_message); ?></div>
@@ -270,7 +265,7 @@ $history = $db->query("SELECT * FROM local_scans ORDER BY id DESC LIMIT 20")->fe
                                 <td><?php echo $row['id']; ?></td>
                                 <td style="font-weight: 600; color: var(--text);"><?php echo htmlspecialchars($row['filename']); ?></td>
                                 <td><?php echo htmlspecialchars($row['file_size']); ?></td>
-                                <td style="font-weight: bold; color: <?php echo $row['ai_score'] > 70 ? 'var(--danger)' : 'var(--success)'); ?>">
+                                <td style="font-weight: bold; color: <?php echo $row['ai_score'] > 70 ? 'var(--danger)' : 'var(--success)'; ?>">
                                     <?php echo $row['ai_score']; ?>%
                                 </td>
                                 <td><?php echo htmlspecialchars($row['verdict']); ?></td>
