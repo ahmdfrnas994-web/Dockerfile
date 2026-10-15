@@ -42,7 +42,6 @@ try {
         ['ssjr', 'ssjr123'],
         ['aziz', 'aziz123'],
         ['ahmed', 'Azaz123']
-        ['ramzi', 'ramzi123']
     ];
 
     foreach ($default_users as $u) {
