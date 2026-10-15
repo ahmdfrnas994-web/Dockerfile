@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
 RUN a2enmod rewrite
 
 # Copy project files to Apache web root
-COPY . /var/www/html/
 
 # Set proper permissions for web server data and uploads
 RUN mkdir -p /var/www/html/uploads && \
